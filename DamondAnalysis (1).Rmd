@@ -1,0 +1,923 @@
+---
+title: "DamondAnalysis"
+output: html_document
+date: '2022-08-15'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#library(EBImage)
+#library(preprocessCore)
+library(ggplot2)
+library(parallel)
+library(umap)
+library(pheatmap)
+library(scMerge)
+library(scater)
+library(SingleCellExperiment)
+library(CytoSpill)
+library(flowCore)
+#library(lme4)
+#library(lmerTest)
+library(caret)
+library(glmnet)
+library(e1071)
+#library(spicyR)
+#library(spatstat)
+#library(FlowSOM)
+library(Biobase)
+library(flowViz)
+library(plyr)
+#library(lisaClust)
+library(cytomapper)
+library(readr)
+#library(imcdatasets)
+library(simpleSeg)
+```
+
+```{r}
+set.seed(2123)
+nCores <- 20
+BPPARAM <- simpleSeg:::generateBPParam(nCores)
+
+theme_set(theme_classic())
+```
+
+
+
+```{r}
+DamondIlastikSCE <- imcdatasets::DamondPancreas2019_sce()
+DamondImages <- imcdatasets::DamondPancreas2019_images()
+DamodMasksIlastik <- imcdatasets::DamondPancreas2019_masks()
+DamondImagesUse <- DamondImages
+```
+
+
+```{r}
+#subset
+subset <- DamondImagesUse[[1]][1:100, 1:100, 37]
+```
+
+```{r}
+conditionDF <- data.frame(ImageNum <- DamondIlastikSCE@colData@listData[["ImageNumber"]], imageName <- DamondIlastikSCE@colData@listData[["ImageFullName"]],  diabetesStat <- DamondIlastikSCE@colData@listData[["stage"]], Aab <- DamondIlastikSCE@colData@listData[["Aab.status"]], pseudoStage <- DamondIlastikSCE@colData@listData[["group"]], section <- DamondIlastikSCE@colData@listData[["part"]])
+colnames(conditionDF) <- c("ImageNum", "ImageName", "stage", "AabStatus", "pesudostage", "section")
+
+conditionDFImage <-  unique(conditionDF)
+```
+
+```{r}
+########### Testing chunk #####################
+test <- NULL
+test_2 <- NULL
+for(i in 1:length(DamondImagesUse)){test_2[i] <- nucSeg(DamondImagesUse[[i]], nucleusIndex = "Ir191", transform = "sqrt")}
+
+test3 <- nucSeg(image, nucleusIndex = "Ir191", transform = "sqrt")
+
+
+
+longImage <- data.frame(apply(image,
+                                     3, as.vector))
+
+plot(density(longImage$Ir191))
+
+ggplot(data = longImage, aes(x = Ir191)) +
+  geom_density( fill="dodgerblue", alpha=0.5)+
+  geom_vline(xintercept=nth, size=1.5, color="red")
+
+
+nucSeg(image, nucleusIndex = 37)
+
+lapply(DamondImagesUse, nucSeg, nucleusIndex = 37)
+```
+
+
+
+```{r}
+mcols(DamondImagesUse)$stage <- c(conditionDFImage$stage)
+mcols(DamondImagesUse)$AabStatus <- c(conditionDFImage$AabStatus)
+```
+
+
+```{r}
+subset <- DamondImages[1:20]
+
+DamondMasks <- simpleSeg::simpleSeg(subset, nucleus = c("Ir193", "PCA"), discSize = 3, cores = 20, tolerance = 0.15, transform = "sqrt")
+
+
+#mcols(DamondMasks) <- mcols(DamondImagesUse[1:2,])
+
+```
+```{r}
+for (i in 1:length(DamondMasks)){
+  print(i)
+  print(max(DamondMasks[[i]]))
+  print(max(DamodMasksIlastik[[i]]))
+}
+```
+
+
+```{r}
+DamondMask <- simpleSeg(subset[4], nucleus = c("Ir193"), discSize = 3, transform = c("sqrt"), watershed = "combine", tolerance = 0.15)
+
+imageInd = 4
+
+cells = rgbImage(green=0.05 * DamondImagesUse[[imageInd]][,,1], blue=0.2 * DamondImagesUse[[imageInd]][,,"CD44"])
+display(cells)
+
+
+
+
+segmented = paintObjects(DamondMask[[1]], cells, col='#ff00ff')
+display(segmented)
+
+#display(DamondMask[[1]])
+```
+
+
+
+```{r}
+channelNames(DamondImagesUse)[16] <- "PD_1"
+channelNames(DamondImagesUse)[28:29] <- c("KI_67", "NKX6_1")
+DamondSCE2 <- measureObjects(DamondMasks, DamondImagesUse, "ImageNumber", BPPARAM = BPPARAM)
+```
+
+```{r}
+library(ggplot2)
+
+df <- as.data.frame(cbind(colData(DamondSCE2), t(assay(DamondSCE2, "counts"))))
+# Plots densities of PanKRT for each image.
+ggplot(df, aes(x = CD3e, colour = ImageName)) + 
+  geom_density() + 
+  xlab("CD3e intensity")+
+  theme(legend.position = "none", axis.text=element_text(size=12),
+        axis.title=element_text(size=14,face="bold"))
+```
+```{r}
+
+cellsSCE <- simpleSeg::normalizeCells(DamondSCE2, 
+                        transformation = "sqrt", 
+                        method = c("trim99", "minMax", "PC1"), 
+                        assayIn = "counts")
+```
+```{r}
+df <- as.data.frame(cbind(colData(cellsSCE), t(assay(cellsSCE, "norm"))))
+# Plots densities of PanKRT for each image.
+ggplot(df, aes(x = CD3e, colour = ImageName)) + 
+  geom_density() + 
+  theme(legend.position = "none")
+```
+scmerge
+```{r}
+cells <- df
+#markers <- channelNames(DamondImagesUse)
+markers <- unique(cellsSCE$cellType)
+ncores <- 64
+        use_bpparam <- BiocParallel::MulticoreParam(workers = ncores)
+        use_bsparam <- BiocSingular::RandomParam()
+        use_bnparam <- BiocNeighbors::AnnoyParam()
+        # dat_sub <- dat[sample(nrow(dat), 500000), ]
+        # ctl_genes <- rownames(sce)
+        exprsMat <- t(cells[, markers])
+        colnames(exprsMat) <- seq_len(ncol(exprsMat))
+        scMerge_res <- scMerge2(exprsMat = exprsMat, #the exprs matrix to be normalised
+                                batch = cells$imageID, # batch labels
+                                cellTypes = NULL, # set NULL clustering will be performed within scMerge2... can also try the published cell type labels, which will match between the cell types
+                                use_bpparam = use_bpparam,
+                                use_bsparam = use_bsparam,
+                                use_bnparam = use_bnparam,
+                                ruvK = 2, # Number of unwanted variation to be removed
+                                ctl = markers, # negative control genes
+                                k_psuedoBulk = 5, # Number of pseudo bulk to be created for each cell type each batch
+                                k_celltype = 20, # Number of neighbours when perform graph clustering
+                                pseudoBulk_fn = create_pseudoBulk, # ways of constructing pseudo bulk
+                                ncores = ncores,
+                                chosen.hvg = markers, #Highly variable genes to be used to identify pseudo-replicates... since IMC has very few features, using all features.
+                                cosineNorm = F,
+                                return_subset = FALSE,
+                                normalised = T)
+        dat_norm <- as.data.frame(scMerge_res$newY)
+        cells[, markers] <- dat_norm
+        
+cellsSCE@assays@data@listData[["normsc"]] <- t(cells[, markers])
+```
+
+
+```{r}
+df <- as.data.frame(cbind(colData(DamondCellsSCE), t(assay(DamondCellsSCE, "normsc"))))
+# Plots densities of PanKRT for each image.
+ggplot(df, aes(x = CD3e, colour = ImageName)) + 
+  geom_density() + 
+  xlab("CD3e intensity")+
+  theme(legend.position = "none", axis.text=element_text(size=12),
+        axis.title=element_text(size=14,face="bold"))
+```
+
+
+```{r}
+#divide the cells in four main categories (islet, immune, exocrine, and “other”)
+
+isletMarkers <- c("INS", "PIN", "GCG", "SST", "PPY", "PDX1", "NKX6_1", "IAPP", "PCSK2", "CD99",  "SYP")
+#4
+immuneMarkers <- c('CD45', 'CD3e', 'CD4', 'CD8a', 'CD20', 'CD68', 'MPO', 'CD45RA')
+#6
+exocrineMarkers <- c('KRT19', 'AMY2A', 'CD44')
+#2
+otherMarkers <- c('SMA', 'CD31', 'CDH')
+#3
+cellMarkers <- c(isletMarkers, immuneMarkers, exocrineMarkers, otherMarkers)
+
+cells$cellOBJ <- rownames(cells)
+```
+```{r}
+cellGroups <- FuseSOM::runFuseSOM(cellsSCE, 
+                    markers = cellMarkers, 
+                    assay = 'normsc', 
+                    numClusters = 30)
+```
+```{r}
+scater::plotGroupedHeatmap(DamondCellsSCE, 
+                           features = cellMarkers, 
+                           group = "cellType", 
+                           exprs_values = "norm",
+                           center = TRUE, 
+                           scale = TRUE, 
+                           zlim = c(-3,3),
+                           cluster_rows = FALSE,
+                           cluster_columns = FALSE)
+```
+```{r}
+colData(cellGroups)$cellTypeClusters <- colData(cellGroups)$clusters
+colData(cellGroups)$cellTypeClusters <- as.factor(colData(cellGroups)$cellTypeClusters)
+levels(colData(cellGroups)$cellTypeClusters)
+levels(colData(cellGroups)$cellTypeClusters) <- c("acinar_1", "unknown_beta_10", "endothelial_11", "alpha_12", "delta_13", "alpha_endocrine_14", "beta_15", "unknown_16", "alpha_17", "beta_18", "beta_19", "acinar_2","gamma_20", "cytT_21", "ductal_monocyteMacrophage_22", "stromal_endothelial_23", "monocyteMacrophage_24", "neutrophil_25", "exocrine_26", "stromal_27", "helperT_28", "cytT_29", "acinar_3", "cytT_30", "stromal_4", "exocrine_5", "ductal_epithelial_6", "endothelial_7", "unknown_8", "ductal_epithelial_9")
+
+
+```
+
+```{r}
+library(forcats)
+colData(cellGroups)$cellType <- colData(cellGroups)$cellTypeClusters
+colData(cellGroups)$cellType <- fct_collapse(colData(cellGroups)$cellTypeClusters, acinar = c("acinar_1","acinar_2", 'acinar_3'), alpha = c("alpha_12","alpha_17"), alpha_endocrine_14 = "alpha_endocrine_14", beta = c("beta_15", "beta_18", 'beta_19'), cytT = c('cytT_30', 'cytT_29'), cytT_21 = c("cytT_21"), delta = c("delta_13"), ductal_epithelial = c("ductal_epithelial_6", "ductal_epithelial_9"), ductal_monocyteMacrophage_22 = c("ductal_monocyteMacrophage_22"),  endothelial = c('endothelial_11', 'endothelial_7'), exocrine = c("exocrine_26", "exocrine_5"), gamma = c("gamma_20"), helperT = "helperT_28", monocyteMacrophage = c('monocyteMacrophage_24'), neutrophil = 'neutrophil_25', stromal = c('stromal_27', "stromal_4"), stromal_endothelial_23 = c("stromal_endothelial_23"), unknown = c('unknown_16', 'unknown_8'), unknown_beta_10 = c("unknown_beta_10"))
+```
+
+
+```{r}
+colData(DamondCellsSCE)$cellType |>
+  table() |>
+ 
+  
+   sort()
+```
+
+```{r}
+cells <- damondCellsDF
+cells$clusters <- as.factor(cellGroups$clusters)
+levels(cells$clusters)
+cells2 <- cells
+levels(damondCellsDF$clusters)<- c("alpha_endocrine_1", 'alpha_beta_endocrine_10', 'islet_11', 'cytoT_12', 'neutrophil_13', 'monocyte_macrophage_14', 'stromal_15', 'endothelial_16', 'beta_endocrine_17', 'delta_endocrine_18', 'islet_19', 'alpha_endothelial_2', 'cytoT_20', 'stromal_21', 'stromal_22', 'unknown_23', 'immune_24', 'immune_25', 'beta_26', 'unknown_gamma_27', 'unknown_28', 'alpha_beta_ductal29', 'islet_3', 'islet_30', 'ductal_31', 'ductal_32', 'gamma_33', 'delta_34', 'gamma_35', 'ductal_36', 'gamma_37', 'acinar_38', 'gamma_delta_beta_39', 'cytoT_4', 'gamme_delta_beta_40', 'acinar_41', 'ductal_42', 'immune_43', 'immune_44', 'exocrine_45', 'exocrine_46', 'acinar_47', 'acinar_48', 'beta_49', 'helperT_5', 'ductal_exocrine_50', 'monocyte_macrophage_helperT_6', 'monocyte_macrophage_7', 'endothelial_stromal_8', 'endothelial_9')
+
+
+# Clustering Islet cells
+```
+```{r}
+isletCells <- subset(cells2, clusters %in% c("alpha_endocrine_1", 'alpha_beta_endocrine_10', 'islet_11','beta_endocrine_17', 'delta_endocrine_18', 'islet_19', 'alpha_endothelial_2',  'unknown_gamma_27', 'alpha_beta_ductal29', 'islet_3', 'islet_30', 'gamma_delta_beta_39', 'gamme_delta_beta_40', 'ductal_exocrine_50'))
+
+isletMarkers2 <- c(isletMarkers, exocrineMarkers)
+
+cellGroups <- FuseSOM::runFuseSOM(isletCells, 
+                    markers = isletMarkers2, 
+                    assay = 'norm', 
+                    numClusters = 20)
+isletCells$cluster <- cellGroups$clusters
+
+```
+
+```{r}
+isletCells$cluster <- as.factor(isletCells$cluster)
+levels(isletCells$cluster)
+
+levels(isletCells$cluster) <-  test <- c("alpha_I1", "beta_I10", "delta_I11", "delta_I12", "unknown_I13", "acinar_I14", "Exocrine_I15", "beta_I16", "ductal_I17", "ductal_I18", "exocrine_I19", "unknown_2", "beta_I20", "beta_I3", "acinar_I4", "alpha_I5", "unknown_I6", "beta_I7", "unknown_I8", "gamma_I9")
+```
+```{r}
+#damondCellsDF2 <- damondCellsDF
+isletCells2 <- isletCells
+cells3 <- cells2
+cells3$clusters <- as.character(cells3$clusters)
+isletCells2$cluster <- as.character(isletCells2$cluster)
+inds <- match(cells3$cellOBJ, isletCells2$cellOBJ)
+cells3$clusters[!is.na(inds)] <- isletCells2$cluster[na.omit(inds)]
+cells3$clusters
+
+cells3$clusters <- as.factor(cells3$clusters)
+
+```
+
+```{r}
+x <- factor(c("A","B","A","C","D","E","A","E","C"))
+
+library(forcats)
+cells3$cellType <- cells3$clusters
+fct_collapse(cells3$cellType, acinar = c("acinar_I4","acinar_41", 'acinar_47', 'acinar_48', 'acinar_I14', 'acinar_I4'), alpha = c("alpha_I1","alpha_I5"), beta = c("beta_26", "beta_49", 'beta_I10', 'beta_I16', 'beta_I20', 'beta_I3', 'beta_I7'), cytT = c('cytoT_12', 'cytoT_20', 'cytoT_4'), delta = c("delta_34", "delta_I11","delta_I12"), ductal = c('ductal_31', 'ductal_32', 'ductal_36', 'ductal_42', 'ductal_I17', 'ductal_I18'), endothelial = c('endothelial_16', 'endothelial_9'), endothelialStromal = 'endothelial_stromal_8', exocrine = c('exocrine_45', 'exocrine_46', 'exocrine_I15', 'exocrine_I19'), gamma = c('gamma_33', 'gamma_35', 'gamma_37', 'gamma_I9'), helperT = "helperT_5", immune <- c('immune_24', 'immune_25', 'immune_43', 'immune_44'), monocyteMacrophage = c('monocyte_macrophage_14', 'monocyte_macrophage_7'), monocyteMacrophageHelperT = 'monocyte_macrophage_helperT_6', neutrophil = 'neutrophil_13', stromal = c('stromal_15', 'stromal_21', 'stromal_22'), unknown = c('unknown_2', 'unknown_23', 'unknown_28'), unknownIslet <- c('unknown_I13', 'unknown_I6', 'unknown_I8'))
+```
+
+
+```{r}
+
+
+cellsSCE@colData@listData[["cluster"]] <- cellGroups$clusters
+damondCellsSCE@colData@listData[["cellType"]] <- cells3$clusters
+
+
+```
+
+```{r}
+scater::plotGroupedHeatmap(DamondCellsSCE, 
+                           features = cellMarkers, 
+                           group = "cluster", 
+                           exprs_values = "norm",
+                           center = TRUE, 
+                           scale = TRUE, 
+                           zlim = c(-3,3),
+                           cluster_rows = FALSE,
+                           cluster_columns = FALSE)
+```
+
+
+
+
+```{r}
+# B cells, cytotoxic and helper T cells, monocytes/macrophages, and neutrophils among immune cells (markers used: CD45, CD3e, CD4, CD8a, CD20, CD68, MPO, and CD45RA)
+```
+
+```{r}
+#exocrine cells were divided into acinar and ductal cells (markers used: KRT19, AMY2A, CD44, and CDH)
+```
+
+```{r}
+#“other” cells were divided into three cell types: endothelial (also includes peri-endothelial cells), stromal, and unknown (markers used: SMA, CD31, CD68, and CDH).
+```
+
+
+
+```{r}
+useMarkers <- c("SMA", "INS", "CD38", "CD44", "PCSK2", "CD99", "CD68", "MPO", "SLC2A1", "CD20", "AMY2A", "CD3e", "PPY", "PIN", "GCG","PDX1",  "SST", "SYP", "KRT19","CD45",  "FOXP3", "CD45RA", "CD8a", "CA9", "IAPP","pH3", "CD4",  "CD31", "CDH", "PTPRN", "pRB", "cPARP1")
+# Set seed.
+set.seed(51773)
+# Generate SOM and cluster cells into 20 groups.
+cells <- FuseSOM::runFuseSOM(DamondCellsSCE, 
+                    markers = cellMarkers, 
+                    assay = 'norm', 
+                    numClusters = 50)
+```
+```{r}
+scater::plotGroupedHeatmap(DamondCellsSCE, 
+                           features = cellMarkers, 
+                           group = "cluster", 
+                           exprs_values = "norm",
+                           center = TRUE, 
+                           scale = TRUE, 
+                           zlim = c(-3,3),
+                           cluster_rows = FALSE)
+```
+```{r}
+colData(DamondCellsSCE)$cellTypeClusters |>
+  table() |>
+ 
+  
+   sort()
+```
+
+
+```{r}
+#Comparing Beta cell counts from control, onset and long duration
+nonDiabetic <- DamondCellsSCE$Outcome1%in%c("Non-diabetic")
+
+onset <- DamondCellsSCE$Outcome1%in%c("Onset")
+longDuration <- DamondCellsSCE$Outcome1%in%c("Long-duration")
+
+CellsDF <- data.frame(t(DamondCellsSCE@assays@data@listData[["norm"]]), duration <- DamondCellsSCE$Outcome1, cellType <- DamondCellsSCE$cellTypeBackup, imageID <- DamondCellsSCE$ImageName)
+```
+
+
+
+```{r}
+#As compared to non-diabetic controls, β cell fraction was reduced by 62% in donors with recent-onset T1D
+#pancreata from donors with prolonged disease duration were almost entirely devoid of β cells
+#in non-diabetic donors, the percentage of β cells was highest in islets of intermediate size, and lowest in very small (< 10 cells) and very large (> 250 cells) islets (Figure 2D)
+#The distribution of α cells exhibited the opposite trend, whereas δ cell fractions were fairly constant
+#We observed that in non-diabetic donors, α cells were preferentially located at the islet periphery than in the islet core, whereas β cells exhibited an opposite tropism (Figure 2E). Similarly, α cells were more frequently found along blood vessels than were β cells (Figure 2F).
+
+#The proportion of β cells decreased only slightly from pseudostage 1 to pseudostage 2, whereas pseudostage 3 was essentially composed of pseudo-atrophic islets, i.e. which are devoid of β cells 
+#β cell markers (INS, PIN, IAPP, and PTPRN) was strongly downregulated between pseudostages 1 and 2 but remained relatively stable between pseudostages 2 and 3
+# β cell transcription factors, PDX1 and NKX6–1, and pan-endocrine markers, SYP and CD99, did not vary substantially through the three pseudostages
+
+#Overall, T cells were more abundant in donors with recent-onset T1D
+#In long-duration T1D donors, MΦ and neutrophil densities were elevated relative to donors without T1D, whereas Tc and Th cell abundances were decreased compared to recent-onset donors but remained higher than in donors without T1D
+#Most islets from non-diabetic controls and donors with long-duration T1D had no or few associated immune cells. By contrast, around half of the islets from donors with recent-onset T1D had six associated immune cells or more
+#Strikingly, insulitis (> 15 associated immune cells) was present in over 30% of β cell-rich (pseudostage 2) islets from recent-onset donors, but in less than 10% of β cell-depleted (pseudostage 3) islets from the same donors
+#Islet-associated Tc and Th cells were more abundant in pseudostage 2 islets but these numbers decreased in pseudostage 3 islets from recent-onset T1D donors and further decreased in pseudostage 3 islets from donors with long-duration T1D, suggesting that T cells progressively leave islets after β cell destruction
+
+
+#interactions involving β cells were strongly reduced or absent in pseudostage 3 islets, as a result of β cell loss
+#Association between immune cells was also frequent, in particular at pseudostages 2 and 3 (Figure 5B, magenta rectangles). By contrast, islet and immune cells essentially remained isolated from each other at all disease stages, confirming our previous observation that immune cells are rarely found within islets.
+#First, we counted how often β cells were associated with Tc, respectively Th cells. This number remained extremely low in all islets but was highest for β cells from pseudostage 2 islets
+```
+
+
+```{r}
+library(spicyR)
+cellsToUse <- DamondCellsSCE$stage %in% c("Non-diabetic", "Long-duration")
+# Perform simple wicoxon rank sum tests on the columns of the proportion matrix.
+test <- spicyR::colTest(DamondCellsSCE[, cellsToUse], 
+                    condition = "stage", 
+                    feature = "cellType")
+test
+```
+
+```{r}
+
+
+#imagesToUse <- rownames(conditionDFImage)[clinical[, "Status"]%in%c("nonprogressor", "progressor")]
+cellsToUse <- DamondCellsSCE$region %in% c("region_2")
+
+prop <- spicyR::getProp(DamondCellsSCE[,cellsToUse], feature = "cellType")
+cellsToUse <- "cytT"
+
+#boxplot( (prop[, cellsToUse] ~ conditionDFImage[paste0(rownames(prop), ".tiff"), "stage"]), xlab = cellsToUse)
+#boxplot( (prop[, cellsToUse] ~ conditionDFImage[, "stage"]), xlab = cellsToUse)
+conditionImage <- data.frame(image= DamondCellsSCE$imageID, stage = DamondCellsSCE$stage)
+conditionImageUnique <- unique(conditionImage)
+
+prop.df <- data.frame(prop, stage = as.factor(conditionImageUnique[, "stage"]))
+
+
+
+
+
+propIslet <- prop.df[,c('alpha', 'beta', 'gamma', 'delta', 'stage')]
+
+totalIsletProp <- NULL
+IsletAlpha <- NULL
+IsletBeta <- NULL
+IsletGamma <- NULL
+IsletDelta <- NULL
+for (i in 1:length(propIslet$stage)){
+  totalIsletProp[i] <- propIslet$alpha[i] + propIslet$beta[i] + propIslet$gamma[i] + propIslet$delta[i]
+  IsletAlpha[i] <- propIslet$alpha[i]/totalIsletProp[i]
+  IsletBeta[i] <- propIslet$beta[i]/totalIsletProp[i]
+  IsletGamma[i] <- propIslet$gamma[i]/totalIsletProp[i]
+  IsletDelta[i] <- propIslet$delta[i]/totalIsletProp[i]
+}
+prop.df$isletAlpha <- IsletAlpha
+propIslet$isletBeta <- IsletBeta
+propIslet$isletGamma <- IsletGamma
+propIslet$isletDelta <- IsletDelta
+
+#cellsToUse <- "isletGamma"
+
+my_comparisons <- list( c("Non-diabetic", "Onset"), c("Onset", "Long-duration"), c("Non-diabetic", "Long-duration") )
+
+prop.df$stage <- factor(prop.df$stage, levels=c('Non-diabetic','Onset','Long-duration'))
+prop.df$stage <- revalue(prop.df$stage, c("Non-diabetic"="Non diabetic", "Long-duration"="Long duration"))
+#prop.df <- prop.df[order(levels(prop.df$stage)),]
+
+cellsToUse <- "cytT"
+g <- ggplot(prop.df, aes(x=stage, y=prop.df[, cellsToUse], fill = stage)) +
+    #scale_x_discrete("absent", "nonbrisk", "brisk") +
+    #geom_violin(trim=FALSE, alpha = 0.5)+
+    geom_boxplot(width=0.5, alpha = 0.7) +
+    theme_minimal() + 
+    #ggpubr::stat_compare_means(comparisons = my_comparisons, method = "t.test", size = 4, family="sans")+ # Add pairwise comparisons p-value
+    #ggpubr::stat_compare_means(label.y = 6, method = "anova", size = 5, family="sans")+
+    geom_point(position = position_jitter(seed = 1, width = 0.03), alpha = 0.2)+
+    ylim(0.0, 0.05) +
+  theme(legend.position = "none", axis.text=element_text(size=15),
+        axis.title=element_text(size=20,face="bold"))+
+  xlab("T1D stage")+
+  ylab("Cytotoxic T cell proportion")
+g + scale_fill_brewer(palette="Reds")
+
+
+
+
+ggplot(propI)
+
+```
+```{r}
+library(dplyr)
+df <- as.data.frame(colData(DamondCellsSCE))
+df2 <- df %>% dplyr::filter(region == "region_2" & cellType %in% c("alpha", "delta", "beta", "gamma"))
+df2$stage <- factor(df2$stage, levels = c("Non-diabetic", "Onset", "Long-duration"))
+library(plyr)
+df2$stage <- revalue(df2$stage, c("Non-diabetic"="Non diabetic", "Long-duration"="Long duration"))
+ggplot(df2,aes(x = stage,fill = cellType)) + 
+    geom_bar(position = "fill") +
+  ylab("proportion of islet cells") +
+  theme_classic()
+
+
+#or
+ggplot(df2,aes(x = stage,fill = cellType)) + 
+    geom_bar(position = "fill") +
+  ylab("Proportion") +
+  xlab("T1D stage") +
+  theme_classic() +
+   theme(axis.text=element_text(size=12),
+        axis.title=element_text(size=14,face="bold"),
+        legend.key.size = unit(0.8, 'cm'), #change legend key size
+        legend.key.height = unit(0.8, 'cm'), #change legend key height
+        legend.key.width = unit(0.8, 'cm'), #change legend key width
+        legend.title = element_text(size=14), #change legend title font size
+        legend.text = element_text(size=13)) +
+  guides(fill=guide_legend(title="Cell type"), size = 20)
+```
+
+
+
+```{r}
+cellsToUse <- DamondCellsSCE$stage %in% c("Non-diabetic", "Long-duration")
+
+spicyTest <- spicyR::spicy(DamondCellsSCE[, cellsToUse], 
+                   condition = "stage", 
+                   cellType = "cellType",
+                   imageID = "ImageNumber",
+                   spatialCoords = c("m.cx", "m.cy"),
+                   to = "beta",
+                   Rs = c(20, 50, 100),
+                   sigma = 50,
+                   BPPARAM = BPPARAM)
+spicyR::topPairs(spicyTest, n = 10)
+```
+```{r}
+spicyR::signifPlot(spicyTest,
+           breaks = c(-1.5, 3, 0.5))
+```
+```{r}
+library(lisaClust)
+library(spatstat.data)
+library(spatstat)
+cellsSCE <- lisaClust(DamondCellsSCE, 
+                   k = 2, 
+                   Rs = c(20, 50, 100),
+                   sigma = 50,
+                   spatialCoords = c("m.cx", "m.cy"), 
+                   cellType = "cellType")
+```
+```{r}
+library(dplyr)
+# Extract cell information and filter to specific image.
+df <- colData(cellsSCE) |>
+as.data.frame()
+df$objectNum <- as.character(df$objectNum)
+df <- df %>% dplyr::filter(imageID == "E02_a0_full_clean")
+
+# Colour cells by their region.
+ggplot(df, aes(x = m.cx, y = m.cy, colour = region)) +
+  geom_point()
+```
+```{r}
+
+# Use hatching to visualise regions and cell types.
+hatchingPlot(DamondCellsSCE,
+             useImages = "E02_a0_full_clean",
+             cellType = "cellType",
+             spatialCoords = c("m.cx", "m.cy")
+            )
+
+```
+```{r}
+testRegion <- colTest(cells[,cellsToUse], 
+                      feature = "region",
+                      condition = "stage")
+
+testRegion
+```
+
+```{r}
+# Visualise the enrichment of each cell type in each region
+regionMap(cells, cellType = "cellType", limit = c(0.2, 5))
+```
+```{r}
+data <- scFeatures::scFeatures(cells, 
+                   feature_types = c("proportion_raw", "gene_mean_celltype"),
+                   sample = "imageID",
+                   celltype = "cellType",
+                   assay = "normsc",
+                   ncores = nCores )
+
+names(data) <- c("prop", "mean")
+```
+```{r}
+test <- colTest(data$mean[DamondImagesUse,],
+                condition = clinical[DamondImagesUse, "Outcome1"])
+
+test |> head()
+```
+
+
+## Using Ilastik masks
+```{r}
+ilastikMasks <- imcdatasets::DamondPancreas2019_masks()
+
+mcols(ilastikMasks) <- mcols(DamondImagesUse)
+```
+```{r}
+DamondSCEIlastik <- measureObjects(ilastikMasks, DamondImagesUse, "ImageNumber", BPPARAM = BPPARAM)
+```
+
+```{r}
+library(ggplot2)
+
+df <- as.data.frame(cbind(colData(DamondSCEIlastik), t(assay(DamondSCEIlastik, "counts"))))
+# Plots densities of PanKRT for each image.
+ggplot(df, aes(x = CD3e, colour = ImageName)) + 
+  geom_density() + 
+  theme(legend.position = "none")
+```
+```{r}
+cellsIlastik <- simpleSeg::normalizeCells(DamondSCEIlastik, 
+                        transformation = "sqrt", 
+                        method = c("trim99", "minMax"), 
+                        assayIn = "counts")
+```
+```{r}
+df <- as.data.frame(cbind(colData(cellsIlastik), t(assay(cellsIlastik, "counts"))))
+# Plots densities of PanKRT for each image.
+ggplot(df, aes(x = CD3e, colour = ImageName)) + 
+  geom_density() + 
+  theme(legend.position = "none")
+```
+```{r}
+useMarkers <- c("SMA", "INS", "CD38", "CD44", "PCSK2", "CD99", "CD68", "MPO", "SLC2A1", "CD20", "AMY2A", "CD3e", "PPY", "PIN", "GCG","PDX1",  "SST", "SYP", "KRT19","CD45",  "FOXP3", "CD45RA", "CD8a", "CA9", "IAPP","pH3", "CD4",  "CD31", "CDH", "PTPRN", "pRB", "cPARP1")
+# Set seed.
+set.seed(51773)
+# Generate SOM and cluster cells into 20 groups.
+cellscellsIlastik <- FuseSOM::runFuseSOM(cellsIlastik, 
+                    markers = useMarkers, 
+                    assay = 'norm', 
+                    numClusters = 20)
+```
+```{r}
+scater::plotGroupedHeatmap(cellscellsIlastik, 
+                           features = useMarkers, 
+                           group = "clusters", 
+                           exprs_values = "norm",
+                           center = TRUE, 
+                           scale = TRUE, 
+                           zlim = c(-3,3),
+                           cluster_rows = FALSE)
+```
+
+```{r}
+
+# variation= INS, PIN, IAPP, and PTPRN
+# stagnation - PD_1, NKX6_1
+cellsToUse <- DamondCellsSCE$stage %in% c("Non-diabetic", "Onset") & DamondCellsSCE$cellType == "beta"
+cellsToUseLong <- DamondCellsSCE$stage %in% c("Long-duration") & DamondCellsSCE$cellType == "beta"
+testBeta_Non <- DamondCellsSCE[,cellsToUseNon]
+testBeta_Long <- DamondCellsSCE[,cellsToUseLong]
+testBeta <- DamondCellsSCE[,cellsToUse]
+
+
+betaDf <- data.frame(t(testBeta@assays@data@listData[["normsc"]]), stage <- as.factor(testBeta$stage))
+ggplot(betaDf, aes(x = stage....as.factor.testBeta.stage., y = NKX6_1)) + geom_boxplot()
+testIAPP <- t.test(betaDf$stage....as.factor.testBeta.stage. ~ betaDf$IAPP)
+
+
+colMeans(t(testBeta_Non@assays@data@listData[["normsc"]]), dims = 1)
+colMeans(t(testBeta_Long@assays@data@listData[["normsc"]]), dims = 1)
+```
+```{r}
+library(dplyr)
+dfWhole <- colData(cellsSCE) |>
+as.data.frame()
+dfWholeNon <- dfWhole %>% dplyr::filter(stage == "Non-diabetic")
+dfWholeNon$objectNum <- as.character(dfWholeNon$objectNum)
+df <- dfWholeNon %>% dplyr::filter(imageID == "E02_a0_full_clean")
+
+
+
+window <- spatstat.geom::owin(xrange = range(df$m.cx), yrange = range(df$m.cy))
+
+
+
+image.ppp = ppp(df$m.cx, df$m.cy, window = window, marks = df$cellType)
+
+plot(image.ppp)
+
+closepairs = spatstat.geom::closepairs(image.ppp, rmax = 400, what = "ijd", distinct = FALSE)
+
+
+closepairs.df <- as.data.frame(closepairs)
+closepairs.df2 <- closepairs.df
+
+image.ppp$marks
+
+indexdf <- data.frame(seq_along(image.ppp$marks), image.ppp$marks)
+indexdf$region <- df$region
+
+colnames(indexdf)[1] <- "image.marks.i"
+
+closepairs.df1 <- closepairs.df <- closepairs.df %>% inner_join( indexdf, c("i" = "image.marks.i"))
+
+colnames(indexdf)[1] <- "image.marks.j"
+
+closepairs.df12 <- closepairs.df1 %>% inner_join( indexdf, c("j" = "image.marks.j"))
+
+
+closepairs.dfUse <- closepairs.df12 %>% dplyr::filter(image.ppp.marks.x %in% c("beta", "alpha") & region.y == "region_1")
+
+
+
+library(dplyr)
+closepairs.dfUse2 <- closepairs.dfUse %>%
+  dplyr::group_by(i) %>%
+  dplyr::summarise(
+    MinDistanceByCell = min(d, na.rm = T),
+  ) %>%
+ arrange(i)
+
+closepairs.dfUse3 <- as.data.frame(closepairs.dfUse2 %>% inner_join( indexdf, c("i" = "image.marks.j")))
+
+ggplot(closepairs.dfUse3, aes(x = image.ppp.marks, y = MinDistanceByCell))+
+  geom_boxplot()
+
+
+alpha <- mean(closepairs.dfUse3[closepairs.dfUse3$image.ppp.marks == 'alpha', 'MinDistanceByCell'])
+beta <- mean(closepairs.dfUse3[closepairs.dfUse3$image.ppp.marks == 'beta', 'MinDistanceByCell'])
+
+
+my_comparisons <- list( c("alpha", "beta"))
+g <- ggplot(closepairs.dfUse3, aes(x=image.ppp.marks, y=MinDistanceByCell, fill = image.ppp.marks)) +
+    #scale_x_discrete("absent", "nonbrisk", "brisk") +
+    geom_violin(trim=FALSE, alpha = 0.5)+
+    geom_boxplot(width=0.15, alpha = 0.7) +
+    theme_minimal() + 
+    ggpubr::stat_compare_means(comparisons = my_comparisons, method = "t.test", size = 5, family="sans")+ # Add pairwise comparisons p-value
+    geom_point(position = position_jitter(seed = 1, width = 0.03), alpha = 0.2)+
+  theme(legend.position = "none", axis.text=element_text(size=12),
+        axis.title=element_text(size=14,face="bold"))+
+  xlab("cell type")+
+  ylab("distance to islet periphary (μm)")+
+    coord_flip() 
+g + scale_fill_brewer(palette="RdPu")
+
+```
+
+looping above
+```{r}
+dfWhole <- colData(DamondCellsSCE) |>
+as.data.frame()
+
+alphaList <- NULL
+betaList <- NULL
+
+dfWholeNon <- dfWhole %>% dplyr::filter(stage == "Onset")
+for (i in 1:length(unique(dfWholeNon$imageID))){
+  df <- dfWholeNon %>% dplyr::filter(imageID == unique(dfWholeNon$imageID)[i])
+
+
+
+window <- spatstat.geom::owin(xrange = range(df$m.cx), yrange = range(df$m.cy))
+
+
+
+image.ppp = ppp(df$m.cx, df$m.cy, window = window, marks = df$cellType)
+
+plot(image.ppp)
+
+closepairs = spatstat.geom::closepairs(image.ppp, rmax = 400, what = "ijd", distinct = FALSE)
+
+
+closepairs.df <- as.data.frame(closepairs)
+closepairs.df2 <- closepairs.df
+
+image.ppp$marks
+
+indexdf <- data.frame(seq_along(image.ppp$marks), image.ppp$marks)
+indexdf$region <- df$region
+
+colnames(indexdf)[1] <- "image.marks.i"
+
+closepairs.df1 <- closepairs.df <- closepairs.df %>% inner_join( indexdf, c("i" = "image.marks.i"))
+
+colnames(indexdf)[1] <- "image.marks.j"
+
+closepairs.df12 <- closepairs.df1 %>% inner_join( indexdf, c("j" = "image.marks.j"))
+
+
+closepairs.dfUse <- closepairs.df12 %>% dplyr::filter(image.ppp.marks.x %in% c("beta", "alpha") & region.y == "region_1")
+
+
+
+
+closepairs.dfUse2 <- closepairs.dfUse %>%
+  group_by(i) %>%
+  dplyr::summarise(
+    MinDistanceByCell = min(d, na.rm = T),
+  ) %>%
+  arrange(i)
+
+closepairs.dfUse3 <- as.data.frame(closepairs.dfUse2 %>% inner_join( indexdf, c("i" = "image.marks.j")))
+
+ggplot(closepairs.dfUse3, aes(x = image.ppp.marks, y = MinDistanceByCell))+
+  geom_boxplot()
+
+
+alpha <- mean(closepairs.dfUse3[closepairs.dfUse3$image.ppp.marks == 'alpha', 'MinDistanceByCell'])
+alphaList[i] <- alpha
+beta <- mean(closepairs.dfUse3[closepairs.dfUse3$image.ppp.marks == 'beta', 'MinDistanceByCell'])
+betaList[i] <- beta
+}
+
+dfDist <- data.frame(alpha = alphaList, beta = betaList)
+
+stacked_df <- stack(dfDist)
+head(stacked_df)
+
+ggplot(stacked_df, aes(x = stacked_df$ind, y = stacked_df$values, fill = stacked_df$ind))+
+  geom_boxplot() +
+  xlab("cell type") +
+  ylab("average distance to islet perophary per patient in μm") +
+  theme_classic() +
+  theme(legend.position = "none")
+
+distTest <- t.test(values ~ ind, data = stacked_df)
+
+stacked_df2 <- stacked_df
+
+levels(stacked_df2$ind) <- c("alpha", "beta")
+
+
+
+```
+```{r}
+nonDiabeticdf <- stacked_df
+nonDiabeticdf$stage <- rep("Non diabetic", length(stacked_df$values))
+onsetdf <- stacked_df
+onsetdf$stage <- rep("Onset", length(stacked_df$values))
+longDurationdf <- stacked_df
+longDurationdf$stage <- rep("Long duration", length(stacked_df$values))
+
+
+fulldf <- rbind(nonDiabeticdf, onsetdf)
+fulldf <- rbind(fulldf, longDurationdf)
+
+fulldf$stage <- as.factor(fulldf$stage)
+#levels(df$stage) <- c("Long-duration", "Non-diabetic", "Onset")
+fulldf$stage <- factor(fulldf$stage, levels = c("Non diabetic", "Onset", "Long duration"))
+
+ggplot(fulldf, aes(stage, values, fill = ind)) +
+  geom_boxplot() +
+  xlab("cell type") +
+  ylab("average distance to islet perophary per patient in μm") +
+  theme_classic() +
+  theme(legend.position = "none")
+```
+
+```{r}
+ggplot(distancesToIsletDamond, aes(x=stage, y=values, fill = ind)) +
+    #scale_x_discrete("absent", "nonbrisk", "brisk") +
+    geom_violin(trim=FALSE, alpha = 0.2, position=position_dodge(1))+
+  geom_jitter(shape=16, position=position_jitterdodge(dodge.width = 1, jitter.width = 0.2), alpha = 0.5) +
+  geom_boxplot(position=position_dodge(1), width = 0.15)+
+    #geom_dotplot(binaxis='y', stackdir='center',
+    #             position=position_dodge(1)) +
+  theme_minimal() + 
+  theme(axis.text=element_text(size=12),
+        axis.title=element_text(size=14,face="bold"),
+        legend.key.size = unit(0.8, 'cm'), #change legend key size
+        legend.key.height = unit(0.8, 'cm'), #change legend key height
+        legend.key.width = unit(0.8, 'cm'), #change legend key width
+        legend.title = element_text(size=14), #change legend title font size
+        legend.text = element_text(size=13))+
+  guides(fill=guide_legend(title="Cell type"), size = 20) +
+  xlab("T1D stage")+
+  ylab("Distance to islet periphary (μm)")
+    #coord_flip() 
+  scale_fill_brewer(palette="Accent")
+
+    
+```
+
+
+
+
+```{r}
+g <- ggplot(stacked_df2, aes(x=ind, y=values, fill = ind)) +
+    #scale_x_discrete("absent", "nonbrisk", "brisk") +
+    geom_violin(trim=FALSE, alpha = 0.5)+
+    geom_boxplot(width=0.15, alpha = 0.7) +
+    theme_minimal() + 
+    ggpubr::stat_compare_means(comparisons = my_comparisons, method = "t.test", size = 5, family="sans")+ # Add pairwise comparisons p-value
+    geom_point(position = position_jitter(seed = 1, width = 0.03), alpha = 0.2)+
+  theme(legend.position = "none", axis.text=element_text(size=12),
+        axis.title=element_text(size=14,face="bold"))+
+  xlab("cell type")+
+  ylab("distance to islet periphary (μm)")+
+    coord_flip() 
+g + scale_fill_brewer(palette="Blues")
+
+```
+
