@@ -1,0 +1,625 @@
+---
+title: "Maldegem_lung_cancer_analysis"
+author: "Alexander Nicholls"
+date: "2022-09-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+knitr::opts_chunk$set(echo = TRUE)
+
+#library(cytomapper)
+library(dplyr)
+library(ggplot2)
+library(simpleSeg)
+#library(FuseSOM)
+library(ggpubr)
+library(scater)
+#library(spicyR)
+library(ClassifyR)
+#library(scFeatures)
+#library(lisaClust)
+```
+
+```{r}
+nCores <- 20
+BPPARAM <- simpleSeg:::generateBPParam(nCores)
+
+theme_set(theme_classic())
+```
+
+
+Reading in Images
+```{r}
+pathToImages <- "/albona/nobackup2/biostat/datasets/spatial/Maldegem2021_LungCancer_IMC/data/Images/IMC_ometiff_files"
+
+# Get directories of images
+imageDirs <- dir(pathToImages, full.names = TRUE, pattern = "tif")
+names(imageDirs) <- dir(pathToImages, full.names = FALSE, pattern = "tif")
+
+# Get files in each directory
+files <- sapply(imageDirs, list.files, pattern = "tif", full.names = TRUE, simplify = FALSE)
+
+# Read files with readImage from EBImage
+images <- lapply(imageDirs, EBImage::readImage)
+```
+```{r}
+library(readr)
+MaldegemPannel <- as.data.frame(read_csv("/albona/nobackup2/biostat/datasets/spatial/Maldegem2021_LungCancer_IMC/data/Febe_pannel.csv"))
+MaldegemPannel[1,3] <- "NA_1"
+MaldegemPannel[3,3] <- "NA_2"
+MaldegemPannel[4,3] <- "NA_3"
+MaldegemPannel[30,3] <- "Ir191"
+MaldegemPannel[31,3] <- "Ir193"
+
+images <- cytomapper::CytoImageList(images)
+
+channelNames(images)<-MaldegemPannel$Antibody
+
+treatment <- c(rep("Vehicle", 6), rep("MRTX", 6))
+
+mcols(images)$name <- names(images)
+mcols(images)$treatment <- treatment
+```
+
+```{r}
+FebeMasks <- simpleSeg(images, nucleus = c("Ir191", "PCA"), discSize = 1, cores = 12)
+```
+
+```{r}
+imageInd = 2
+
+cells = rgbImage(green=0.05 * images[[imageInd]][,,"Ir191"], blue=0.05 * images[[imageInd]][,,"CD44"])
+display(cells)
+
+
+
+
+segmented = paintObjects(FebeMasks[[imageInd]], cells, col='#ff00ff')
+display(segmented)
+display(cells)
+```
+```{r}
+imageIndex <- 3
+
+plotCells(mask = FebeMasks[imageIndex], object = cellGroups[,colData(FebeSCE)$name == unique(colData(FebeSCE)$name)[imageIndex]],
+            cell_id = "object_id", img_id = "name", colour_by = "clusters", display("single"))
+
+plotCells(mask = FebeMasks, object = cellGroups,
+            cell_id = "object_id", img_id = "name", colour_by = "clusters")
+```
+
+
+
+```{r}
+FebeSCE <- measureObjects(FebeMasks, images, "name", BPPARAM = BPPARAM)
+```
+
+```{r}
+library(ggplot2)
+
+df <- as.data.frame(cbind(colData(FebeSCE), t(assay(FebeSCE, "counts"))))
+# Plots densities of PanKRT for each image.
+ggplot(df, aes(x = CD44, colour = name)) + 
+  geom_density() + 
+  xlab("CD3e intensity")+
+  theme(legend.position = "none", axis.text=element_text(size=12),
+        axis.title=element_text(size=14,face="bold"))
+```
+```{r}
+cellsSCE <- simpleSeg::normalizeCells(FebeSCE, 
+                        transformation = "sqrt", 
+                        method = "minMax", 
+                        assayIn = "counts")
+```
+```{r}
+df <- as.data.frame(cbind(colData(cellsSCE), t(assay(cellsSCE, "norm"))))
+df$`image name` <- df$name
+# Plots densities of PanKRT for each image.
+ggplot(df, aes(x = CD44, colour = `image name`)) + 
+  geom_density() +
+  theme_classic() + 
+  theme(axis.text=element_text(size=12),
+        axis.title=element_text(size=14,face="bold"),
+        legend.key.size = unit(0.7, 'cm'), #change legend key size
+        legend.key.height = unit(0.7, 'cm'), #change legend key height
+        legend.key.width = unit(0.7, 'cm'), #change legend key width
+        legend.title = element_text(size=14), #change legend title font size
+        legend.text = element_text(size=10))+
+  guides(fill=guide_legend(title="image name"), size = 20) +
+  xlab("CD44 expression")+
+  ylab("density")
+    #coord_flip() 
+
+```
+```{r}
+clustermarkers <- c("CD45", "CD3e", "CD4", "Foxp3", "CD8a", "CD45R", "CD335", "MHC_2", "CD11c", "CD103", "F4_80", "CD68", "Ly_6G", "PECAM_CD31", "EpCAM", "alphaSMA", "PVR", "CD44")
+
+
+tumourMarker <- c("CD44", "PVR")
+
+Tcell <- c("CD3e", "CD4")
+```
+
+
+```{r}
+markers <- clustermarkers
+cellGroups <- FuseSOM::runFuseSOM(cellsSCE, 
+                    markers = markers, 
+                    assay = 'norm',
+                    numClusters = 30)
+
+```
+```{r}
+
+
+scater::plotGroupedHeatmap(cellGroups, 
+                           features = markers, 
+                           group = "clusters", 
+                           exprs_values = "norm",
+                           center = TRUE, 
+                           scale = TRUE, 
+                           zlim = c(-3,3),
+                           cluster_rows = FALSE,
+                           cluster_columns = FALSE)
+```
+```{r}
+FebeSCE$cellTypeClusters <- FebeSCE$clusters
+FebeSCE$cellTypeClusters <- as.factor(FebeSCE$cellTypeClusters)
+levels(FebeSCE$cellTypeClusters) <- c("helperT_1", "dendritic_10", "unknown_11", "macrophage_12", "tumourMac_13", "tumour_14", "unknown_15", "tumour_16", "macrophage_17", "tumour_18", "cytT_19", "dendritic_2", "unknown_20", "epithelial_21", "fibroblast_22", "fibroblast_23", "tumourMac_24", "macrophage_25", "tumourMac_26", "tumour_27", "NK_28", "NKNutTumour_29", "neutrophil_3", "endothelialTumour_30", "B_4", "Endothelial_5", "Endothelial_6", "unknown_7", "dendriticcDC1_8", "epithelial_9")
+```
+
+```{r}
+library(forcats)
+FebeSCE$cellType <- FebeSCE$cellTypeClusters
+
+FebeSCE$cellType<-fct_collapse(FebeSCE$cellType, B = c("B_4"), cytT = c("cytT_19"), dendritic = c("dendritic_10", "dendritic_2"), dendriticcDC1 = c("dendriticcDC1_8"), endothelial = c("Endothelial_5", "Endothelial_6"), endothelialTumour = c('endothelialTumour_30'), epithelial = c('epithelial_21', 'epithelial_9'), fibroblast = c('fibroblast_22', 'fibroblast_23'), helperT = c('helperT_1'), macrophage = c('macrophage_12', 'macrophage_17', 'macrophage_25'), neutrophil = "neutrophil_3", NK = c('NK_28'), NKNutTumour = c('NKNutTumour_29'), tumour = c('tumour_14', 'tumour_16', 'tumour_18', 'tumour_27'), tumourMac = c('tumourMac_13', 'tumourMac_24', 'tumourMac_26'), unknown = c('unknown_11', 'unknown_15', 'unknown_20', 'unknown_7'))
+
+
+```
+
+
+```{r}
+colData(FebeSCE)$cellType |>
+  table() |>
+ 
+  
+   sort()
+```
+
+```{r}
+testProp <- colTest(FebeSCE, 
+                    condition = "treatment", 
+                    feature = "cellType")
+
+testProp
+```
+proportion plot
+```{r}
+
+
+
+
+df <- as.data.frame(colData(FebeSCE))
+ggplot(df %>% dplyr::filter(region == "region_1"),aes(x = treatment,fill = cellType)) + 
+    geom_bar(position = "fill") +
+  theme_classic()
+
+mycols <- c('#1a1c2c', '#5d275d',
+'#b13e53',
+'#ef7d57',
+'#ffcd75',
+'#a7f070',
+'#38b764',
+'#257179',
+'#29366f',
+'#3b5dc9',
+'#41a6f6',
+'#73eff7',
+'#f4f4f4',
+'#94b0c2',
+'#566c86',
+'#333c57')
+df <- as.data.frame(colData(FebeSCE))
+df$`cell type` <- df$cellType
+ggplot(df,aes(x = treatment,fill = `cell type`)) + 
+    geom_bar(position = "fill") +
+  theme_classic() +
+  scale_fill_manual(values = mycols) +
+  ylab("proportion")+
+  theme(axis.text=element_text(size=13),
+        axis.title=element_text(size=15,face="bold" ),
+        legend.key.size = unit(0.6, 'cm'), #change legend key size
+        legend.key.height = unit(0.6, 'cm'), #change legend key height
+        legend.key.width = unit(0.6, 'cm'), #change legend key width
+        legend.title = element_text(size=14), #change legend title font size
+        legend.text = element_text(size=12))
+```
+
+
+```{r}
+prop <- spicyR::getProp(cellGroups, feature = "cellType")
+cellsToUse <- "cytT"
+
+prop.df <- as.data.frame(prop)
+```
+
+```{r}
+prop.df$stage <- treatment
+prop.df$stage <- factor(prop.df$stage, levels=c('Vehicle','MRTX'))
+```
+
+```{r}
+ggplot(prop.df, aes(stage, fibroblast)) +
+  geom_boxplot()
+```
+Vimentin expression in treatment groups
+
+
+```{r}
+febe.df <- data.frame(t(assay(FebeSCE)), cellType = FebeSCE$cellType, x = FebeSCE$m.cx, y = FebeSCE$m.cy, treatment = as.factor(FebeSCE$treatment))
+febe.df$treatment <- factor(febe.df$treatment, levels=c("Vehicle", "MRTX"))
+
+
+ggplot(febe.df, aes(cellType, sqrt(vimentin), fill = treatment)) +
+  geom_boxplot() +
+  theme_classic() +
+  xlab("cell type")+
+  ylab("vimentin expression")+
+  theme(axis.text.x = element_text(angle = 90,vjust=.5, hjust=1),
+        axis.text=element_text(size=12),
+        axis.title=element_text(size=15,face="bold" ),
+        legend.key.size = unit(0.6, 'cm'), #change legend key size
+        legend.key.height = unit(0.6, 'cm'), #change legend key height
+        legend.key.width = unit(0.6, 'cm'), #change legend key width
+        legend.title = element_text(size=14), #change legend title font size
+        legend.text = element_text(size=12))
+
+#ggplot(febe.df, aes(treatment, sqrt(vimentin)))+
+ # geom_boxplot()
+```
+```{r}
+spicyTest <- spicyR::spicy(cellGroups, 
+                   condition = "treatment", 
+                   cellType = "cellType",
+                   imageID = "imageID",
+                   spatialCoords = c("m.cx", "m.cy"),
+                   Rs = c(20, 50, 100),
+                   sigma = 50,
+                   BPPARAM = BPPARAM)
+spicyR::topPairs(spicyTest, n = 10)
+```
+```{r}
+spicyR::signifPlot(spicyTest,
+           breaks = c(-1.5, 3, 0.5))
+```
+
+
+```{r}
+library(lisaClust)
+library(spatstat.data)
+library(spatstat)
+FebeSCE <- lisaClust(FebeSCE, 
+                   k = 4, 
+                   Rs = c(20, 50, 100),
+                   sigma = 50,
+                   spatialCoords = c("m.cx", "m.cy"), 
+                   cellType = "cellType")
+```
+
+
+```{r}
+
+df <- as.data.frame(cbind(colData(FebeSCE), t(assay(FebeSCE, "norm"))))
+df$region <- as.factor(df$region)
+levels(df$region) <- c("Normal", "Structural", "Tumor Boundry", "Tumour")
+# Plots densities of PanKRT for each image.
+ggplot(df %>% dplyr::filter(cellType == "helperT"), aes(x = CD279, colour = treatment)) + 
+  geom_freqpoly()+
+  theme_classic()+
+  xlab("Mean intensity of PD1 in helper T cells") +
+  theme(axis.text=element_text(size=15),
+        axis.title=element_text(size=15,),
+        legend.key.size = unit(0.8, 'cm'), #change legend key size
+        legend.key.height = unit(0.8, 'cm'), #change legend key height
+        legend.key.width = unit(0.8, 'cm'), #change legend key width
+        legend.title = element_text(size=14), #change legend title font size
+        legend.text = element_text(size=13))
+```
+
+
+```{r}
+library(dplyr)
+# Extract cell information and filter to specific image.
+df <- colData(FebeSCE) |>
+as.data.frame()
+df$object_id <- as.character(df$object_id)
+df <- df %>% dplyr::filter(imageID == unique(FebeSCE$imageID)[2])
+df$region <- as.factor(df$region)
+levels(df$region) <- c("Normal", "Structural", "Tumor Boundry", "Tumour")
+
+# Colour cells by their region.
+ggplot(df, aes(x = m.cx, y = m.cy, colour = region)) +
+  geom_point()+
+  coord_flip()+
+  theme_classic()+
+  theme(axis.text=element_text(size=13),
+        axis.title=element_text(size=15,face="bold"),
+        legend.key.size = unit(0.8, 'cm'), #change legend key size
+        legend.key.height = unit(0.8, 'cm'), #change legend key height
+        legend.key.width = unit(0.8, 'cm'), #change legend key width
+        legend.title = element_text(size=14), #change legend title font size
+        legend.text = element_text(size=13))+
+  xlab("X")+
+  ylab("Y")
+  
+  #scale_color_brewer(palette="Dark2")
+```
+```{r}
+df <- colData(FebeSCE) |>
+as.data.frame()
+df2 <- data.frame(t(assay(FebeSCE)), df)
+df2$region <- as.factor(df2$region)
+levels(df2$region) <- c("Normal", "Structural", "Tumor boundry", "Tumour")
+
+ggplot(df2, aes(imageID, sqrt(CD44), fill = region)) +
+  geom_boxplot()
+
+ggplot(df2 %>% filter(df2$imageID == "BRAC3438.6f_ROI1_t1_Vehicle.ome.tiff"), aes(region, sqrt(PECAM_CD31), fill = region)) +
+  geom_violin(alpha = 0.2)+
+  #geom_jitter(shape=16, position=position_jitter(0.1), alpha = 0.5) +
+  geom_boxplot(width = 0.25, outlier.alpha = 0.1)+
+  theme_classic() +
+  xlab("tissue region")+
+  ylab("PECAM CD31 expression")+
+  theme(axis.text=element_text(size=13),
+        axis.title=element_text(size=15, face="bold"),
+        legend.position = "none")
+
+
+```
+```{r}
+prop <- spicyR::getProp(FebeSCE[,FebeSCE$region == "region_2"], feature = "cellType")
+cellsToUse <- "cytT"
+
+prop.df <- as.data.frame(prop)
+```
+
+```{r}
+prop.df$stage <- treatment
+prop.df$stage <- factor(prop.df$stage, levels=c('Vehicle','MRTX'))
+```
+
+```{r}
+ggplot(prop.df, aes(stage, tumour)) +
+  geom_boxplot()
+```
+```{r}
+testProp <- colTest(cellsSCE[,cellsSCE$region == "region_2"], 
+                    condition = "treatment", 
+                    feature = "cellType")
+
+testProp
+```
+
+```{r}
+library(dplyr)
+dfWhole <- colData(cellsSCE) |>
+as.data.frame()
+dfWhole$object_id <- as.character(dfWholeNon$object_id)
+df <- dfWhole %>% dplyr::filter(imageID == "BRAC3326.4e_ROI1_t1_Vehicle.ome.tiff")
+
+
+
+window <- spatstat.geom::owin(xrange = range(df$m.cx), yrange = range(df$m.cy))
+
+
+
+image.ppp = ppp(df$m.cx, df$m.cy, window = window, marks = df$cellType)
+
+plot(image.ppp)
+
+closepairs = spatstat.geom::closepairs(image.ppp, rmax = 400, what = "ijd", distinct = FALSE)
+
+
+closepairs.df <- as.data.frame(closepairs)
+closepairs.df2 <- closepairs.df
+
+image.ppp$marks
+
+indexdf <- data.frame(seq_along(image.ppp$marks), image.ppp$marks)
+indexdf$region <- df$region
+indexdf$cellType <- df$cellType
+indexdf$treatment <- df$treatment
+
+
+colnames(indexdf)[1] <- "image.marks.i"
+
+closepairs.df1 <- closepairs.df <- closepairs.df %>% inner_join( indexdf, c("i" = "image.marks.i"))
+
+colnames(indexdf)[1] <- "image.marks.j"
+
+closepairs.df12 <- closepairs.df1 %>% inner_join( indexdf, c("j" = "image.marks.j"))
+closepairs.dfUse <- closepairs.df12
+
+closepairs.dfUse <- closepairs.df12 %>% filter(image.ppp.marks.x %in% c("beta", "alpha") & region.y == "region_1")
+
+
+
+
+closepairs.dfUse2 <- closepairs.dfUse %>%
+  group_by(i, ) %>%
+  summarise(
+    MinDistanceByCell = min(d, na.rm = T),
+  ) %>%
+  arrange(i)
+
+closepairs.dfUse3 <- as.data.frame(closepairs.dfUse2 %>% inner_join( indexdf, c("i" = "image.marks.j")))
+
+ggplot(closepairs.dfUse3, aes(x = image.ppp.marks, y = MinDistanceByCell))+
+  geom_boxplot()
+
+
+alpha <- mean(closepairs.dfUse3[closepairs.dfUse3$image.ppp.marks == 'alpha', 'MinDistanceByCell'])
+beta <- mean(closepairs.dfUse3[closepairs.dfUse3$image.ppp.marks == 'beta', 'MinDistanceByCell'])
+
+
+my_comparisons <- list( c("alpha", "beta"))
+g <- ggplot(closepairs.dfUse3, aes(x=image.ppp.marks, y=MinDistanceByCell, fill = image.ppp.marks)) +
+    #scale_x_discrete("absent", "nonbrisk", "brisk") +
+    geom_violin(trim=FALSE, alpha = 0.5)+
+    geom_boxplot(width=0.15, alpha = 0.7) +
+    theme_minimal() + 
+    ggpubr::stat_compare_means(comparisons = my_comparisons, method = "t.test", size = 5, family="sans")+ # Add pairwise comparisons p-value
+    geom_point(position = position_jitter(seed = 1, width = 0.03), alpha = 0.2)+
+  theme(legend.position = "none", axis.text=element_text(size=12),
+        axis.title=element_text(size=14,face="bold"))+
+  xlab("cell type")+
+  ylab("distance to islet periphary (μm)")+
+    coord_flip() 
+g + scale_fill_brewer(palette="RdPu")
+```
+
+```{r}
+library(spatstat)
+#looping above
+df <- colData(FebeSCE) |>
+as.data.frame()
+df <- data.frame(t(assay(FebeSCE)), df)
+
+
+
+tumourList <- unknownList <-NKList<-tumourMacList<-macrophageList<-epithelialList<-endothelialList<-fibroblastList<-endothelialTumourList<-dendriticcDC1List<-helperTList<-dendriticList<-BList<-NKNutTumourList<-neutrophilList<- NULL
+
+dfWholeNon <- df %>% dplyr::filter(treatment == "Vehicle")
+for (i in 1:length(unique(dfWholeNon$imageID))){
+  df <- dfWholeNon %>% dplyr::filter(imageID == unique(dfWholeNon$imageID)[i])
+
+
+
+window <- spatstat.geom::owin(xrange = range(df$m.cx), yrange = range(df$m.cy))
+
+
+
+image.ppp = ppp(df$m.cx, df$m.cy, window = window, marks = df$cellType)
+
+plot(image.ppp)
+
+closepairs = spatstat.geom::closepairs(image.ppp, rmax = 400, what = "ijd", distinct = FALSE)
+
+
+closepairs.df <- as.data.frame(closepairs)
+closepairs.df2 <- closepairs.df
+
+image.ppp$marks
+
+indexdf <- data.frame(seq_along(image.ppp$marks), image.ppp$marks)
+indexdf$cellType <- df$cellType
+
+colnames(indexdf)[1] <- "image.marks.i"
+
+closepairs.df1 <- closepairs.df <- closepairs.df %>% inner_join( indexdf, c("i" = "image.marks.i"))
+
+colnames(indexdf)[1] <- "image.marks.j"
+
+closepairs.df12 <- closepairs.df1 %>% inner_join( indexdf, c("j" = "image.marks.j"))
+
+
+closepairs.dfUse <- closepairs.df12 %>% dplyr::filter(cellType.y == "cytT")
+
+
+
+
+closepairs.dfUse2 <- closepairs.dfUse %>%
+  group_by(i) %>%
+  dplyr::summarise(
+    MinDistanceByCell = min(d, na.rm = T),
+  ) %>%
+  arrange(i)
+
+closepairs.dfUse3 <- as.data.frame(closepairs.dfUse2 %>% inner_join( indexdf, c("i" = "image.marks.j")))
+
+ggplot(closepairs.dfUse3, aes(x = image.ppp.marks, y = MinDistanceByCell))+
+  geom_boxplot()
+
+
+tumour <- mean(closepairs.dfUse3[closepairs.dfUse3$image.ppp.marks == 'tumour', 'MinDistanceByCell'])
+tumourList[i] <- tumour
+unknown <- mean(closepairs.dfUse3[closepairs.dfUse3$image.ppp.marks == 'unknown', 'MinDistanceByCell'])
+unknownList[i] <- unknown
+NK <- mean(closepairs.dfUse3[closepairs.dfUse3$image.ppp.marks == 'NK', 'MinDistanceByCell'])
+NKList[i] <- NK
+tumourMac <- mean(closepairs.dfUse3[closepairs.dfUse3$image.ppp.marks == 'tumourMac', 'MinDistanceByCell'])
+tumourMacList[i] <- tumourMac
+macrophage <- mean(closepairs.dfUse3[closepairs.dfUse3$image.ppp.marks == 'macrophage', 'MinDistanceByCell'])
+macrophageList[i] <- macrophage
+epithelial <- mean(closepairs.dfUse3[closepairs.dfUse3$image.ppp.marks == 'epithelial', 'MinDistanceByCell'])
+epithelialList[i] <- epithelial
+endothelial <- mean(closepairs.dfUse3[closepairs.dfUse3$image.ppp.marks == 'endothelial', 'MinDistanceByCell'])
+endothelialList[i] <- endothelial
+fibroblast <- mean(closepairs.dfUse3[closepairs.dfUse3$image.ppp.marks == 'fibroblast', 'MinDistanceByCell'])
+fibroblastList[i] <- fibroblast
+endothelialTumour <- mean(closepairs.dfUse3[closepairs.dfUse3$image.ppp.marks == 'endothelialTumour', 'MinDistanceByCell'])
+endothelialTumourList[i] <- endothelialTumour
+dendriticcDC1 <- mean(closepairs.dfUse3[closepairs.dfUse3$image.ppp.marks == 'dendriticcDC1', 'MinDistanceByCell'])
+dendriticcDC1List[i] <- dendriticcDC1
+helperT <- mean(closepairs.dfUse3[closepairs.dfUse3$image.ppp.marks == 'helperT', 'MinDistanceByCell'])
+helperTList[i] <- helperT
+dendritic <- mean(closepairs.dfUse3[closepairs.dfUse3$image.ppp.marks == 'dendritic', 'MinDistanceByCell'])
+dendriticList[i] <- dendritic
+B <- mean(closepairs.dfUse3[closepairs.dfUse3$image.ppp.marks == 'B', 'MinDistanceByCell'])
+BList[i] <- B
+NKNutTumour <- mean(closepairs.dfUse3[closepairs.dfUse3$image.ppp.marks == 'NKNutTumour', 'MinDistanceByCell'])
+NKNutTumourList[i] <- NKNutTumour
+neutrophil <- mean(closepairs.dfUse3[closepairs.dfUse3$image.ppp.marks == 'neutrophil', 'MinDistanceByCell'])
+neutrophilList[i] <- neutrophil
+}
+
+dfDist <- data.frame(tumour = tumourList, unknown = unknownList, NK = NKList, tumourMac = tumourMacList, epithelial = epithelialList, endothelial = endothelialList, fibroblast = fibroblastList, endothelialTumour = endothelialTumourList, dendriticDC1 = dendriticcDC1List, helperT = helperTList, dendritic = dendriticList, B = BList, NKNutTumour = NKNutTumourList,neutrophil = neutrophilList )
+
+stacked_df <- stack(dfDist)
+head(stacked_df)
+
+ggplot(stacked_df, aes(x = stacked_df$ind, y = stacked_df$values, fill = stacked_df$ind))+
+  geom_boxplot() +
+  xlab("cell type") +
+  ylab("average distance to islet perophary per patient in μm") +
+  theme_classic() +
+  theme(legend.position = "none")
+
+#distTest <- t.test(values ~ ind, data = stacked_df)
+
+#stacked_df2 <- stacked_df
+
+#levels(stacked_df2$ind) <- c("alpha", "beta")
+
+
+
+```
+```{r}
+propMRTX<- data.frame(stacked_df, treatment = rep("MTRX", length(stacked_df$values)))
+propVehicle<- data.frame(stacked_df, treatment = rep("Vehicle", length(stacked_df$values)))
+
+totalDF <- rbind(propMRTX, propVehicle)
+```
+```{r}
+febeDistCytT$treatment <- factor(febeDistCytT$treatment, levels = c("Vehicle", "MTRX"))
+ggplot(febeDistCytT, aes(x = febeDistCytT$ind, y = febeDistCytT$values, fill = treatment))+
+  geom_boxplot() +
+  xlab("cell type") +
+  ylab("distance (μm)") +
+  theme_classic() +
+   theme(
+        axis.text=element_text(size=12),
+        axis.title=element_text(size=15,face="bold" ),
+        legend.key.size = unit(0.6, 'cm'), #change legend key size
+        legend.key.height = unit(0.6, 'cm'), #change legend key height
+        legend.key.width = unit(0.6, 'cm'), #change legend key width
+        legend.title = element_text(size=14), #change legend title font size
+        legend.text = element_text(size=12))+
+  coord_flip()
+
+  
+```
+
