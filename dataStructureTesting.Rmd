@@ -1,0 +1,226 @@
+---
+title: "simpleSeg testing"
+author: "Alexander Nicholls"
+date: "2022-09-22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+sce vs segmeted cells
+```{r}
+set.seed(51773)
+
+n = 1000000
+
+cells <- data.frame(row.names = seq_len(n))
+cells$ObjectNumber <- seq_len(n)
+cells$ImageNumber <- rep(1:2,c(n/2,n/2))
+cells$AreaShape_Center_X <- runif(n)
+cells$AreaShape_Center_Y <- runif(n)
+cells$AreaShape_round <- rexp(n)
+cells$AreaShape_diameter <- rexp(n, 2)
+cells$Intensity_Mean_CD8 <- rexp(n, 10)
+cells$Intensity_Mean_CD4 <- rexp(n, 10)
+```
+```{r}
+library(spicyR)
+
+scTime <- NULL
+scSize <- NULL
+for (i in 1:50){
+  start_time <- Sys.time()
+  cellExp <- SegmentedCells(cells, cellProfiler = TRUE)
+  end_time <- Sys.time()
+  scTime[i] <- end_time - start_time
+  scSize[i] <- object.size(cellExp)
+  print(i)
+}
+
+```
+```{r}
+library(SingleCellExperiment)
+counts <- matrix(rpois(100, lambda = 10), ncol=1000000, nrow=2)
+
+#pretend.cell.labels <- sample(letters, ncol(counts), replace=TRUE)
+
+```
+
+```{r}
+sceTime <- NULL
+sceSize <- NULL
+
+for (i in 1:50){
+  counts <- matrix(rpois(100, lambda = 10), ncol=1000000, nrow=2)
+  start_time <- Sys.time()
+  sce <- SingleCellExperiment(list(counts=counts),
+    colData=cells[,1:6])
+  end_time <- Sys.time()
+  sceTime[i] <- end_time - start_time
+  sceSize[i] <- object.size(sce)
+  print(i)
+}
+
+
+```
+```{r}
+library(tidyr)
+theme_set(theme_classic())
+dataStructure <- data.frame(sceTime = sceTime, scTime = scTime)
+dataSize <- data.frame(sceSize = sceSize, scSize = scSize)
+
+longer_testDF <- dataStructure %>%
+  pivot_longer(sceTime:scTime, names_to = "dataStructure", values_to = "runtime")
+print(longer_testDF)
+longer_testDF$dataStructure <- as.factor(longer_testDF$dataStructure)
+
+ggplot(longer_testDF, aes(x = dataStructure, y = runtime)) +
+  geom_boxplot()
+
+t.test(runtime ~ dataStructure, data = longer_testDF)
+
+
+longer_testDF <- dataSize %>%
+  pivot_longer(sceSize:scSize, names_to = "dataStructure", values_to = "size")
+print(longer_testDF)
+longer_testDF$dataStructure <- as.factor(longer_testDF$dataStructure)
+
+ggplot(longer_testDF, aes(x = dataStructure, y = size/1000000)) +
+  geom_boxplot()
+
+t.test(size ~ dataStructure, data = longer_testDF)
+```
+```{r}
+sceAssay <- NULL
+scAssay <- NULL
+
+
+for (i in 1:50){
+  start_time <- Sys.time()
+  assay <- assay(sce)
+  end_time <- Sys.time()
+  sceAssay[i] <- end_time - start_time
+  print(i)
+}
+
+for (i in 1:50){
+  start_time <- Sys.time()
+  assay <- cellExp$cellMarks
+  end_time <- Sys.time()
+  scAssay[i] <- end_time - start_time
+  print(i)
+}
+```
+```{r}
+assaydf <- data.frame(assaysce = sceAssay, assaysc = scAssay)
+
+longer_testDF <- dataSize %>%
+  pivot_longer(sceSize:scSize, names_to = "dataStructure", values_to = "runtime")
+print(longer_testDF)
+longer_testDF$dataStructure <- as.factor(longer_testDF$dataStructure)
+
+ggplot(longer_testDF, aes(x = dataStructure, y = size/1000000)) +
+  geom_boxplot()
+
+t.test(size ~ dataStructure, data = longer_testDF)
+```
+
+Testing extraction time on Damond data
+```{r}
+assayUse <- assay(DamondCellsSCE, "norm")
+cellType <- DamondCellsSCE$cellType
+ImageNumber <- DamondCellsSCE$ImageNumber
+#cellNum <- DamondCellsSCE$objectNum
+
+celldf <- data.frame(t(assayUse), cellType, ImageNumber)
+
+marker_Names <- colnames(celldf[1:38])
+marker_NamesNew <- NULL
+for (i in 1:length(marker_Names)){
+  marker_NamesNew[i] <- paste("Intensity_Mean_", marker_Names[i], sep = "")
+}
+colnames(celldf)[1:38] <- marker_NamesNew
+
+n <- length(celldf$H3)
+celldf$AreaShape_Center_X <- runif(n)
+celldf$AreaShape_Center_Y <- runif(n)
+celldf$AreaShape_round <- rexp(n)
+celldf$AreaShape_diameter <- rexp(n, 2)
+
+segmentedCellsDamond <- SegmentedCells(celldf, cellProfiler = TRUE)
+
+
+```
+assayExtractionTime
+```{r}
+sceAssay <- NULL
+scAssay <- NULL
+
+
+for (i in 1:50){
+  start_time <- Sys.time()
+  assaySce <- assay(DamondCellsSCE, "norm")
+  end_time <- Sys.time()
+  sceAssay[i] <- end_time - start_time
+  print(i)
+}
+
+for (i in 1:50){
+  start_time <- Sys.time()
+  assaySc <- segmentedCellsDamond$cellMarks@unlistData@listData
+  end_time <- Sys.time()
+  scAssay[i] <- end_time - start_time
+  print(i)
+}
+```
+```{r}
+assaydf <- data.frame(assaysce = sceAssay, assaysc = scAssay)
+
+longer_testDF <- assaydf %>%
+  pivot_longer(assaysce:assaysc, names_to = "dataStructure", values_to = "runtime")
+print(longer_testDF)
+longer_testDF$dataStructure <- as.factor(longer_testDF$dataStructure)
+
+ggplot(longer_testDF, aes(x = dataStructure, y = runtime)) +
+  geom_boxplot()
+
+t.test(runtime ~ dataStructure, data = longer_testDF)
+```
+cell type extraction
+```{r}
+sceCT <- NULL
+scCT <- NULL
+
+
+for (i in 1:50){
+  start_time <- Sys.time()
+  sceCellType <- colData(DamondCellsSCE)$cellType
+  end_time <- Sys.time()
+  sceCT[i] <- end_time - start_time
+  print(i)
+}
+
+for (i in 1:50){
+  start_time <- Sys.time()
+  scCellType <- segmentedCellsDamond@listData[["cellSummary"]]@unlistData@listData[["cellType"]]
+  end_time <- Sys.time()
+  scCT[i] <- end_time - start_time
+  print(i)
+}
+```
+```{r}
+CTdf <- data.frame(sceCT = sceCT, scCT = scCT)
+
+longer_testDF <- CTdf %>%
+  pivot_longer(sceCT:scCT, names_to = "dataStructure", values_to = "runtime")
+print(longer_testDF)
+longer_testDF$dataStructure <- as.factor(longer_testDF$dataStructure)
+
+ggplot(longer_testDF, aes(x = dataStructure, y = runtime)) +
+  geom_boxplot()
+
+t.test(runtime ~ dataStructure, data = longer_testDF)
+```
+
