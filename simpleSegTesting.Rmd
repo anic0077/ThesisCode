@@ -1,0 +1,354 @@
+---
+title: "Testing for simpleSeg"
+author: "Alexander Nicholls"
+date: "2022-09-20"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(EBImage)
+#library(preprocessCore)
+library(ggplot2)
+library(parallel)
+library(umap)
+library(pheatmap)
+library(scMerge)
+library(scater)
+library(SingleCellExperiment)
+library(CytoSpill)
+library(flowCore)
+#library(lme4)
+#library(lmerTest)
+library(caret)
+library(glmnet)
+library(e1071)
+#library(spicyR)
+#library(spatstat)
+#library(FlowSOM)
+library(Biobase)
+library(flowViz)
+library(plyr)
+#library(lisaClust)
+library(cytomapper)
+library(readr)
+library(imcdatasets)
+library(simpleSeg)
+library(dplyr)
+library(tidyr)
+```
+
+```{r}
+set.seed(2123)
+nCores <- 20
+BPPARAM <- simpleSeg:::generateBPParam(nCores)
+
+theme_set(theme_classic())
+```
+
+
+
+```{r}
+DamondIlastikSCE <- imcdatasets::Damond_2019_Pancreas(data_type = "sce")
+#DamondImages <- imcdatasets::Damond_2019_Pancreas(data_type = "images")
+DamodMasksIlastik <- imcdatasets::Damond_2019_Pancreas(data_type = "masks")
+DamondImagesUse <- DamondImages
+```
+
+
+
+```{r}
+conditionDF <- data.frame(ImageNum = DamondIlastikSCE@colData@listData[["image_number"]], imageName = DamondIlastikSCE@colData@listData[["image_name"]],  diabetesStat = DamondIlastikSCE@colData@listData[["patient_stage"]])
+colnames(conditionDF) <- c("ImageNum", "ImageName", "stage")
+
+conditionDFImage <-  unique(conditionDF)
+```
+
+```{r}
+########### Testing chunk #####################
+test <- NULL
+test_2 <- NULL
+for(i in 1:length(DamondImagesUse)){test_2[i] <- nucSeg(DamondImagesUse[[i]], nucleusIndex = "Ir191", transform = "sqrt")}
+
+test3 <- nucSeg(image, nucleusIndex = "DNA1", transform = "sqrt")
+
+
+
+longImage <- data.frame(apply(image,
+                                     3, as.vector))
+
+plot(density(longImage$Ir191))
+
+ggplot(data = longImage, aes(x = Ir191)) +
+  geom_density( fill="dodgerblue", alpha=0.5)+
+  geom_vline(xintercept=nth, size=1.5, color="red")
+
+
+nucSeg(image, nucleusIndex = 37)
+
+lapply(DamondImagesUse, nucSeg, nucleusIndex = 37)
+```
+
+
+
+```{r}
+mcols(DamondImagesUse)$stage <- c(conditionDFImage$stage)
+mcols(DamondImagesUse)$AabStatus <- c(conditionDFImage$AabStatus)
+
+subset <- DamondImagesUse[1:20]
+```
+
+
+```{r}
+tolTest <- c(0.01,0.02,0.03,0.04,0.05,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1)
+tolM <- matrix(, nrow = 15, ncol = 20)
+
+for (i in 1:length(tolTest)){
+  DamondMasks <- simpleSeg(subset, nucleus = c("DNA1", "PCA"), cellBody = "none", tolerance = tolTest[i], cores = 20)
+  tolL <- NULL
+  for(j in 1:length(mcols(DamondMasks)$objectNum)){
+    tolL[j] <- mcols(DamondMasks)$objectNum[[j]]
+    
+  }
+  print(tolTest[i])
+  tolM[i,] <- tolL
+}
+
+tolDF <- data.frame(tolerance = tolTest, tolM)
+avgTolerance <- NULL
+for (i in 1:length(tolDF$tolerance)){
+  avgTolerance[i] <- mean(c(tolDF[i,-1]))
+}
+
+library(dplyr)
+library(tidyr)
+
+imageNames <- c("tolerance", mcols(subset)$image_name)
+colnames(tolDF) <- imageNames
+
+tolDF %>%
+  gather(-tolerance, key = "var", value = "value") %>%
+  ggplot(aes(x = tolerance, y = value)) +
+    geom_point() +
+    stat_smooth() +
+    facet_wrap(~ var, scales = "free") +
+    theme_classic()+
+    theme(axis.text=element_text(size=7),
+          axis.title=element_text(size=14,face="bold"))+
+    ylab("number of objects identified" )
+
+#mcols(DamondMasks) <- mcols(DamondImagesUse[1:2,])
+
+tolL
+
+
+
+```
+
+
+
+```{r}
+set.seed(2953)
+DamondMasks <- simpleSeg(subset, nucleus = c("DNA1", "PCA"), cellBody = "none", cores = 20)
+DamondMasksSqrt <- simpleSeg(subset, nucleus = c("DNA1", "PCA"), cellBody = "none", transform = "sqrt", cores = 20)
+DamondMasksAsinh <- simpleSeg(subset, nucleus = c("DNA1", "PCA"), cellBody = "none", transform = "asinh", cores = 20)
+DamondMaskNorm99 <- simpleSeg(subset, nucleus = c("DNA1", "PCA"), cellBody = "none", transform = "norm99", cores = 20)
+DamondMasksmaxThresh <- simpleSeg(subset, nucleus = c("DNA1", "PCA"), cellBody = "none", transform = "maxThresh", cores = 20)
+
+Ilastik <- NULL
+None <- NULL
+Sqrt <- NULL
+Asinh <- NULL
+Norm99 <- NULL
+maxThresh <- NULL
+
+for (i in 1:length(subset)){
+  Ilastik[i] <-  max(DamodMasksIlastik[[i]])
+  None[i] <- max(DamondMasks[[i]])
+  Sqrt[i] <- max(DamondMasksSqrt[[i]])
+  Asinh[i] <- max(DamondMasksAsinh[[i]])
+  Norm99[i] <- max(DamondMaskNorm99[[i]])
+  maxThresh[i] <- max(DamondMasksmaxThresh[[i]])
+  
+}
+testDF <- data.frame(IlastikCount = Ilastik, NoneCount = None, SqrtCount = Sqrt, AsinhCount = Asinh, Norm99Count = Norm99, MaxThreshCount = maxThresh)
+
+
+longer_testDF <- testDF %>%
+  pivot_longer(IlastikCount:MaxThreshCount, names_to = "maskType", values_to = "cellCount")
+print(longer_testDF)
+longer_testDF$maskType <- as.factor(longer_testDF$maskType)
+levels(longer_testDF$maskType) <- c("arcsinh", "Ilastik", "max threshold", "none", "99th percentile", "square root")
+longer_testDF$maskType <- relevel(longer_testDF$maskType, "Ilastik")
+ggplot(longer_testDF, aes(x = maskType, y = cellCount)) +
+  geom_violin(trim=FALSE, alpha = 0.2, fill='#A4A4A4')+
+  geom_boxplot(width = 0.15)+
+  geom_point(position = position_jitter(seed = 1, width = 0.03), alpha = 0.2) +
+  ylab("cell count")+
+  xlab("transformation used")+
+  theme(axis.text.x = element_text(angle=90, vjust=.5, hjust=1),
+        axis.text=element_text(size=12),
+        axis.title=element_text(size=14,face="bold"),
+        legend.key.size = unit(0.8, 'cm'), #change legend key size
+        legend.key.height = unit(0.8, 'cm'), #change legend key height
+        legend.key.width = unit(0.8, 'cm'), #change legend key width
+        legend.title = element_text(size=14), #change legend title font size
+        legend.text = element_text(size=13))
+```
+
+Measuring runtime
+```{r}
+dimTest <- c(100, 150, 200, 250, 300, 350)
+tolM <- matrix(, nrow = length(dimTest), ncol = 20)
+
+for (i in 1:length(dimTest)){
+  subsetUse <- subset
+  for(j in 1:length(subset)){
+    subsetUse[[j]] <- subset[[j]][1:dimTest[i], 1:dimTest[i],]
+  }
+  for(j in 1:length(subset)){
+    start_time <- Sys.time()
+    DamondMask <- simpleSeg(subsetUse[j], nucleus = c("DNA1", "PCA"), cellBody = "none")
+    end_time <- Sys.time()
+    end_time - start_time
+    tolM[i,j] <- end_time - start_time
+  }
+}
+dimension <- c(100**2, 150**2, 200**2, 250**2, 300**2, 350**2)
+tolDF <- data.frame(size = dimension, tolM)
+
+
+library(dplyr)
+library(tidyr)
+tolDF %>%
+  gather(-size, key = "var", value = "value") %>%
+  ggplot(aes(x = size, y = value)) +
+    geom_point() +
+    stat_smooth() +
+    facet_wrap(~ var, scales = "free") +
+    theme_bw()
+imageNames <- c("size", mcols(subset)$image_name)
+colnames(tolDF) <- imageNames
+
+tolDF %>%
+  gather(-size, key = "var", value = "value") %>%
+  ggplot(aes(x = size, y = value)) +
+    geom_point() +
+    stat_smooth() +
+    facet_wrap(~ var, scales = "free") +
+    theme_classic()+
+    theme(axis.text.x = element_text(angle=90, vjust=.5, hjust=1),
+          axis.text=element_text(size=5),
+          axis.title=element_text(size=14,face="bold"))+
+    ylab("runtime (seconds)" )+
+    xlab("number of pixels")
+#mcols(DamondMasks) <- mcols(DamondImagesUse[1:2,])
+
+tolL
+
+for(i in 1:length(subset)){
+  print(dim(subset[[i]]))
+}
+```
+Different methods affecting runtime
+```{r}
+set.seed(2953)
+
+
+
+
+methodTest <- c("none", "dilate", "discModel", "CD44")
+tolM <- matrix(, nrow = length(methodTest), ncol = 20)
+
+for (i in 1:length(methodTest)){
+  
+  for(j in 1:length(subset)){
+    start_time <- Sys.time()
+    DamondMask <- simpleSeg(subsetUse[j], nucleus = c("DNA1", "PCA"), cellBody = methodTest[i])
+    end_time <- Sys.time()
+    end_time - start_time
+    tolM[i,j] <- end_time - start_time
+  }
+}
+tolDF <- data.frame(t(tolM))
+colnames(tolDF) <- methodTest
+
+
+
+library(dplyr)
+library(tidyr)
+longer_testDF <- tolDF %>%
+  pivot_longer(none:CD44, names_to = "maskType", values_to = "runtime")
+print(longer_testDF)
+longer_testDF$maskType <- as.factor(longer_testDF$maskType)
+
+levels(longer_testDF$maskType) <- c("marker", "dilation", "disc model", "none")
+
+ggplot(longer_testDF, aes(x = maskType, y = runtime)) +
+  geom_violin(trim=FALSE, alpha = 0.2, fill='#A4A4A4')+
+  geom_boxplot(width = 0.15)+
+  geom_point(position = position_jitter(seed = 1, width = 0.03), alpha = 0.2) +
+  ylab("runtime (seconds)")+
+  xlab("cytoplasm identification method")+
+  theme(
+        axis.text=element_text(size=12),
+        axis.title=element_text(size=14,face="bold"),
+        legend.key.size = unit(0.8, 'cm'), #change legend key size
+        legend.key.height = unit(0.8, 'cm'), #change legend key height
+        legend.key.width = unit(0.8, 'cm'), #change legend key width
+        legend.title = element_text(size=14), #change legend title font size
+        legend.text = element_text(size=13))
+```
+Comparing PCA to non PCA nuc identification
+```{r}
+set.seed(2953)
+
+nucTest <- NULL
+nucTest1 <- ("DNA1") 
+nucTest2 <- c("DNA1", "PCA")
+nucList <- list(nucTest1,nucTest2)
+
+tolM <- matrix(, nrow = length(nucList), ncol = 20)
+
+for (i in 1:length(nucList)){
+  
+  for(j in 1:length(subset)){
+    start_time <- Sys.time()
+    DamondMask <- simpleSeg(subsetUse[j], nucleus = c(nucList[[i]]))
+    end_time <- Sys.time()
+    end_time - start_time
+    tolM[i,j] <- end_time - start_time
+  }
+}
+tolDF <- data.frame(t(tolM))
+colnames(tolDF) <- c("Ir193", "PCA")
+
+
+
+library(dplyr)
+library(tidyr)
+testDF <- 
+longer_testDF <- tolDF %>%
+  pivot_longer(Ir193:PCA, names_to = "maskType", values_to = "runtime")
+print(longer_testDF)
+longer_testDF$maskType <- as.factor(longer_testDF$maskType)
+
+levels(longer_testDF$maskType) <- c("marker", "PCA")
+
+ggplot(longer_testDF, aes(x = maskType, y = runtime)) +
+  geom_violin(trim=FALSE, alpha = 0.2, fill='#A4A4A4')+
+  geom_boxplot(width = 0.15)+
+  geom_point(position = position_jitter(seed = 1, width = 0.03), alpha = 0.2) +
+  ylab("runtime (seconds)")+
+  xlab("cytoplasm identification method")+
+  theme(
+        axis.text=element_text(size=12),
+        axis.title=element_text(size=14,face="bold"),
+        legend.key.size = unit(0.8, 'cm'), #change legend key size
+        legend.key.height = unit(0.8, 'cm'), #change legend key height
+        legend.key.width = unit(0.8, 'cm'), #change legend key width
+        legend.title = element_text(size=14), #change legend title font size
+        legend.text = element_text(size=13))
+```
+
